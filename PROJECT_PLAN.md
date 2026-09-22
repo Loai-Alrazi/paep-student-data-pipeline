@@ -10,14 +10,14 @@ The pipeline will collect student data from:
 - REST API
 - SQLite
 
-The planned data flow is:
+The official pipeline order is:
 
 Extract → Source Validation → Clean → Integrate → Transform → Final Validation → Load
 
 The completed pipeline will produce:
 
-- Processed dataset: `data/processed/final_dataset.csv`
-- Rejected records: `data/rejected/rejected_records.csv`
+- Valid records → `data/processed/final_dataset.csv`
+- Invalid records → `data/rejected/rejected_records.csv`
 - Pipeline logs: `logs/pipeline.log`
 
 # Team Members and Responsibilities
@@ -30,6 +30,7 @@ The completed pipeline will produce:
 - `app/output/csv_writer.py`
 - `app/transformation/integration.py`
 - `main.py`
+- `config.json` and `app/utils/config_loader.py`
 - Integration, end-to-end, and output tests when created
 
 ### Responsibilities
@@ -41,6 +42,7 @@ The completed pipeline will produce:
 - End-to-end pipeline orchestration
 - Final README coordination
 - Integration/pipeline testing
+- Advanced requirement: Pipeline Configuration through `config.json` and `app/utils/config_loader.py`
 
 ## عمران
 
@@ -48,7 +50,7 @@ The completed pipeline will produce:
 
 - `app/sources/csv_source.py`
 - `app/transformation/cleaner.py`
-- `data/raw/students.csv` when created
+- `app/utils/metrics.py`
 - CSV and cleaning tests
 
 ### Responsibilities
@@ -59,6 +61,7 @@ The completed pipeline will produce:
 - Duplicate handling
 - Text normalization
 - Extra spaces/case normalization
+- Advanced requirement: Pipeline Metrics through `app/utils/metrics.py`
 
 ## زياد
 
@@ -66,18 +69,20 @@ The completed pipeline will produce:
 
 - `app/sources/api_source.py`
 - `app/transformation/transformer.py`
-- `mock_api/`
+- Mock REST API server implementation in `mock_api/` (canonical seed data is governed by the Canonical Data Policy)
+- `app/utils/incremental.py`
 - API and transformation tests
 
 ### Responsibilities
 
 - REST API extraction
-- Mock API when needed
+- Build a real Mock REST API that serves the canonical seed data over HTTP
 - API error handling
 - Data transformation
 - Data types
 - Missing-value transformation strategy
 - Derived columns
+- Advanced requirement: Incremental Processing through `app/utils/incremental.py` and pipeline state
 
 ## العنسي
 
@@ -85,48 +90,87 @@ The completed pipeline will produce:
 
 - `app/sources/database_source.py`
 - `app/validation/quality.py`
-- `database/`
 - SQLite and validation tests
 
 ### Responsibilities
 
-- SQLite database setup
-- SQL extraction
+- SQLite extraction from the canonical database
 - Source validation
 - Final validation
 - Quality rules
 - Rejected-record classification and error reasons
+- Advanced requirement: Data Lineage, collaborating with لؤي on integration and final dataset construction so the final `source` field records source lineage
 
-# Data Contract
+# Canonical Data Policy
 
-Each source module must return structured data that can be integrated using the shared `student_id` key.
+لؤي prepares the official project data as a canonical baseline before the team begins implementation. Team members must use that baseline and must not independently create alternative project datasets.
 
-## CSV
+The official source files are:
 
-- `student_id`
-- `student_name`
-- `age`
-- `major`
-- `city`
+- `data/raw/students.csv`
+- `mock_api/students_academic.json`
+- `database/students.db`
+- `database/schema.sql`
+- `database/seed.sql`
 
-## REST API
+[DATA_CONTRACT.md](DATA_CONTRACT.md) is the official reference for schemas, rules, and expected values. Any change to canonical data or `DATA_CONTRACT.md` must go through a dedicated, agreed-upon Issue/PR. Members must not change the data to make their own code pass.
 
-- `student_id`
-- `gpa`
-- `attendance`
-- `status`
+# Data Contract Reference
 
-## SQLite
+`PROJECT_PLAN.md` defines ownership, workflow, implementation phases, and delivery requirements. [DATA_CONTRACT.md](DATA_CONTRACT.md), supplied with the canonical baseline, defines the data behavior that implementations and tests must follow:
 
-- `student_id`
-- `course_name`
-- `credit_hours`
-- `semester`
-- `score`
+- Source schemas
+- The shared `student_id` key
+- Validation ranges
+- Missing-value policies
+- Intentional bad records
+- Expected valid IDs
+- Expected rejected cases
+- Derived columns
+- Final dataset columns
+- Lineage format
 
-## Shared Key
+Keep these data definitions in `DATA_CONTRACT.md` rather than duplicating them in this plan. Each source module must return structured data that can be integrated using the shared `student_id` key.
 
-`student_id`
+# REST API Rule
+
+`mock_api/students_academic.json` is seed data only. The final pipeline must not read that JSON file directly. زياد will build a real Mock REST API that serves the seed data over HTTP.
+
+`app/sources/api_source.py` must send an HTTP request, receive JSON, validate the response, and convert it into structured data. It must explicitly handle connection errors, timeouts, HTTP errors, invalid JSON, and empty responses.
+
+# Source Architecture
+
+`app/sources/base_source.py` represents the shared source contract/interface. CSV, REST API, and SQLite sources must be usable by the pipeline through a consistent interface wherever practical, with each source owner following that contract.
+
+The goal is to allow a future source such as Excel, JSON, or MySQL to be added without rewriting the whole pipeline. Keep the interface simple and avoid unnecessary abstractions or extra complexity.
+
+# Advanced Requirements
+
+The project targets all advanced requirements in the assignment:
+
+| Requirement | Implementation and expected behavior | Responsibility |
+| --- | --- | --- |
+| Pipeline Configuration | `config.json` + `app/utils/config_loader.py`; the pipeline loads and uses configuration at runtime. | لؤي |
+| Incremental Processing | `app/utils/incremental.py` + pipeline state; subsequent runs identify and process new or changed data according to that state. | زياد |
+| Data Lineage | The final `source` field preserves contributing source lineage in the format defined by `DATA_CONTRACT.md`. | العنسي, collaborating with لؤي on integration/output |
+| Pipeline Metrics | `app/utils/metrics.py`; report total, valid, rejected, duplicate, and missing counts, plus measured processing time. | عمران |
+| Reusable Architecture | `app/sources/base_source.py` and a consistent source contract used by CSV, REST API, and SQLite. | All source owners, coordinated with لؤي for pipeline integration |
+
+The presence of files alone does not complete these requirements. Every feature must work in the integrated pipeline and be verified before delivery.
+
+# Development Phases
+
+| Phase | Scope |
+| --- | --- |
+| Phase 0 | Repository/Foundation |
+| Phase 1 | Canonical Data & Data Contract |
+| Phase 2 | Source Extraction: CSV / REST API / SQLite |
+| Phase 3 | Cleaning / Transformation / Validation / Integration |
+| Phase 4 | Pipeline orchestration + output + logging |
+| Phase 5 | Advanced requirements: Configuration, Incremental Processing, Lineage, Metrics, and reusable architecture verification |
+| Phase 6 | End-to-end tests + README + final verification |
+
+These are development phases; runtime execution follows the official pipeline order above.
 
 # Ownership Boundaries
 
