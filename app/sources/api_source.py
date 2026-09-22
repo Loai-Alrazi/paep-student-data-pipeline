@@ -10,10 +10,11 @@ import pandas as pd
 import requests
 from app.utils.logger import setup_logger
 
-logger = setup_logger(__name__)
-
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
+LOG_PATH = CONFIG_PATH.parent / "logs" / "pipeline.log"
 REQUIRED_FIELDS = {"student_id", "gpa", "attendance", "status"}
+
+logger = setup_logger(LOG_PATH, name=__name__)
 
 
 class APISourceError(RuntimeError):
