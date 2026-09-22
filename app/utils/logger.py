@@ -3,6 +3,8 @@
 import logging
 from pathlib import Path
 
+from app.utils.config_loader import load_config
+
 
 def setup_logger(log_path: str | Path, name: str = "pipeline") -> logging.Logger:
     """Configure a named logger with one UTF-8 file handler and no propagation.
@@ -41,3 +43,9 @@ def setup_logger(log_path: str | Path, name: str = "pipeline") -> logging.Logger
     logger.setLevel(logging.INFO)
     logger.propagate = False
     return logger
+
+
+def get_logger(name: str = "pipeline") -> logging.Logger:
+    """Create a logger using the shared logging configuration."""
+    config = load_config()
+    return setup_logger(config["logging"]["path"], name=name)
