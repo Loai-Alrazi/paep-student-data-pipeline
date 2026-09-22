@@ -1,0 +1,25 @@
+{
+  "sources": {
+    "csv": {
+      "path": "data/raw/students.csv"
+    },
+    "api": {
+      "url": "http://localhost:8000/students",
+      "timeout_seconds": 5
+    },
+    "database": {
+      "path": "database/students.db"
+    }
+  },
+  "output": {
+    "processed": "data/processed/final_dataset.csv",
+    "rejected": "data/rejected/rejected_records.csv"
+  },
+  "logging": {
+    "path": "logs/pipeline.log"
+  },
+  "incremental": {
+    "enabled": true,
+    "state_path": "data/state/pipeline_state.json"
+  }
+}
