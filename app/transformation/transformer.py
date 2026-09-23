@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import logging
-
 import pandas as pd
+from app.utils.config_loader import load_config
+from app.utils.logger import setup_logger
 
 
 NUMERIC_COLUMNS = ("student_id", "age", "gpa", "attendance", "credit_hours", "score")
-logger = logging.getLogger(__name__)
 
 
 def _valid_median(series: pd.Series, lower: float, upper: float) -> float | None:
@@ -23,6 +22,7 @@ def transform_data(data: pd.DataFrame) -> pd.DataFrame:
 
 	Out-of-range numeric values remain unchanged for the validation layer.
 	"""
+	logger = setup_logger(load_config()["logging"]["path"], name=__name__)
 	logger.info("Starting student data transformation for %d records.", len(data))
 	transformed = data.copy()
 

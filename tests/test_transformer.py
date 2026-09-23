@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from app.transformation import transformer
 from app.transformation.transformer import transform_data
 
 
@@ -89,12 +90,17 @@ def test_numeric_columns_are_converted_without_rejecting_invalid_values():
     assert result.loc[0, "attendance"] == 105
 
 
-def test_transform_logs_transformation_activity(caplog):
+def test_transform_logs_transformation_activity(tmp_path, monkeypatch):
     data = pd.DataFrame({"major": [None], "gpa": [None], "attendance": [None]})
+    log_path = tmp_path / "pipeline.log"
+    monkeypatch.setattr(
+        transformer,
+        "load_config",
+        lambda: {"logging": {"path": str(log_path)}},
+    )
 
-    with caplog.at_level("INFO", logger="app.transformation.transformer"):
-        transform_data(data)
+    transformer.transform_data(data)
 
-    messages = [record.getMessage() for record in caplog.records]
-    assert "Starting student data transformation for 1 records." in messages
-    assert "Completed student data transformation for 1 records." in messages
+    log_content = log_path.read_text(encoding="utf-8")
+    assert "Starting student data transformation for 1 records." in log_content
+    assert "Completed student data transformation for 1 records." in log_content
