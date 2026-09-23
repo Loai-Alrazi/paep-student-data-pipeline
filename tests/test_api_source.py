@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -9,7 +10,7 @@ import pytest
 import requests
 
 from app.sources.api_source import APISource, APISourceError
-from mock_api.server import create_server
+from mock_api.server import make_handler
 
 
 class StaticResponseHandler(BaseHTTPRequestHandler):
@@ -48,7 +49,7 @@ def http_server():
 
 
 def test_extracts_canonical_dataset_through_real_http_request(http_server):
-    url = http_server(create_server(port=0).RequestHandlerClass)
+    url = http_server(make_handler())
 
     df = APISource({"url": url, "timeout_seconds": 2}).extract()
 
@@ -67,11 +68,35 @@ def test_extracts_canonical_dataset_through_real_http_request(http_server):
 
 
 def test_extract_uses_config_mapping(http_server):
-    url = http_server(create_server(port=0).RequestHandlerClass)
+    url = http_server(make_handler())
 
     df = APISource({"url": url, "timeout_seconds": 2}).extract()
 
     assert len(df) == 13
+
+
+def test_default_configuration_comes_from_shared_config():
+    source = APISource()
+
+    assert source.url == "http://localhost:8000/students"
+    assert source.timeout_seconds == 5
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"url": "", "timeout_seconds": 1},
+        {"url": None, "timeout_seconds": 1},
+        {"url": "http://localhost", "timeout_seconds": 0},
+        {"url": "http://localhost", "timeout_seconds": -1},
+        {"url": "http://localhost", "timeout_seconds": float("nan")},
+        {"url": "http://localhost", "timeout_seconds": float("inf")},
+        {"url": "http://localhost", "timeout_seconds": True},
+    ],
+)
+def test_invalid_configuration_is_rejected(config):
+    with pytest.raises(APISourceError):
+        APISource(config)
 
 
 def test_connection_error_is_reported(monkeypatch):
@@ -137,3 +162,24 @@ def test_non_list_payload_is_reported(http_server):
 
     with pytest.raises(APISourceError, match="JSON array"):
         source.extract()
+
+
+def test_each_record_must_contain_required_fields(http_server):
+    class HeterogeneousHandler(StaticResponseHandler):
+        body = json.dumps(
+            [
+                {"student_id": 1001, "gpa": 3.5, "attendance": 90, "status": "active"},
+                {"student_id": 1002},
+            ]
+        ).encode("utf-8")
+
+    source = APISource({"url": http_server(HeterogeneousHandler), "timeout_seconds": 2})
+
+    with pytest.raises(APISourceError, match="record 1.*attendance.*gpa.*status"):
+        source.extract()
+
+
+def test_imported_api_logger_has_no_file_handler():
+    api_logger = logging.getLogger("app.sources.api_source")
+
+    assert not any(isinstance(handler, logging.FileHandler) for handler in api_logger.handlers)

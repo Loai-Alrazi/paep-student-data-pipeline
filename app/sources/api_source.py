@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import json
+import logging
+import math
+from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
 import pandas as pd
 import requests
-from app.utils.logger import get_logger
+from app.utils.config_loader import load_config
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
 REQUIRED_FIELDS = {"student_id", "gpa", "attendance", "status"}
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class APISourceError(RuntimeError):
@@ -21,15 +23,27 @@ class APISourceError(RuntimeError):
 
 
 def load_api_config(config_path: str | Path = CONFIG_PATH) -> dict[str, Any]:
-    with Path(config_path).open(encoding="utf-8") as config_file:
-        config = json.load(config_file)
+    return dict(load_config(config_path)["sources"]["api"])
 
+
+def _validate_api_config(config: Mapping[str, Any]) -> tuple[str, float]:
     try:
-        api_config = config["sources"]["api"]
+        url = config["url"]
+        timeout = config["timeout_seconds"]
     except KeyError as exc:
-        raise APISourceError("Missing sources.api configuration.") from exc
+        raise APISourceError("API configuration requires url and timeout_seconds.") from exc
 
-    return dict(api_config)
+    if not isinstance(url, str) or not url.strip():
+        raise APISourceError("API URL must be a non-empty string.")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, Real)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise APISourceError("API timeout_seconds must be a positive finite number.")
+
+    return url, float(timeout)
 
 
 class APISource:
@@ -37,21 +51,7 @@ class APISource:
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         api_config = dict(config) if config is not None else load_api_config()
-
-        try:
-            self.url = str(api_config["url"])
-            self.timeout_seconds = float(api_config["timeout_seconds"])
-            logger.info(f"API source configured with URL: {self.url} and timeout: {self.timeout_seconds}s.")
-        except KeyError as exc:
-            logger.error("API configuration requires url and timeout_seconds.")
-            raise APISourceError("API configuration requires url and timeout_seconds.") from exc
-        except (TypeError, ValueError) as exc:
-            logger.error("API timeout_seconds must be numeric.")
-            raise APISourceError("API timeout_seconds must be numeric.") from exc
-
-        if not self.url:
-            logger.error("API URL cannot be empty.")
-            raise APISourceError("API URL cannot be empty.")
+        self.url, self.timeout_seconds = _validate_api_config(api_config)
 
     def extract(self) -> pd.DataFrame:
         try:
@@ -92,15 +92,16 @@ class APISource:
             logger.error("API payload records must be JSON objects.")
             raise APISourceError("API payload records must be JSON objects.")
 
+        for index, record in enumerate(payload):
+            missing_fields = REQUIRED_FIELDS.difference(record)
+            if missing_fields:
+                fields = ", ".join(sorted(missing_fields))
+                raise APISourceError(
+                    f"API record {index} is missing required fields: {fields}."
+                )
+
         frame = pd.DataFrame(payload)
         logger.info(f"Extracted {len(frame)} records from API.")
-        missing_fields = REQUIRED_FIELDS.difference(frame.columns)
-        logger.info(f"Required fields: {REQUIRED_FIELDS}")
-        logger.info(f"Available fields: {frame.columns.tolist()}")
-        if missing_fields:
-            fields = ", ".join(sorted(missing_fields))
-            logger.error(f"API payload is missing required fields: {fields}.")
-            raise APISourceError(f"API payload is missing required fields: {fields}.")
 
         logger.info("API extraction completed successfully.")
         return frame
