@@ -7,8 +7,10 @@ import pandas as pd
 # Load data
 # =========================
 
-def load_data(file_path: Path) -> pd.DataFrame:
+def load_data(file_path: str | Path) -> pd.DataFrame:
     """Load the raw CSV file."""
+
+    file_path = Path(file_path)
 
     if not file_path.exists():
         raise FileNotFoundError(
