@@ -30,6 +30,8 @@ def test_transform_fills_missing_major_and_numeric_values_from_valid_medians():
     assert result.loc[3, "attendance"] == 85
     assert result.loc[2, "gpa"] == 4.5
     assert result.loc[2, "attendance"] == 105
+    assert pd.isna(result.loc[2, "performance_level"])
+    assert pd.isna(result.loc[2, "attendance_status"])
 
 
 def test_canonical_medians_exclude_invalid_values():

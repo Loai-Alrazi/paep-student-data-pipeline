@@ -43,17 +43,19 @@ def transform_data(data: pd.DataFrame) -> pd.DataFrame:
 
 	if "gpa" in transformed:
 		performance = pd.Series(pd.NA, index=transformed.index, dtype="string")
-		performance.loc[transformed["gpa"] >= 3.5] = "Excellent"
-		performance.loc[(transformed["gpa"] >= 3.0) & (transformed["gpa"] < 3.5)] = "Very Good"
-		performance.loc[(transformed["gpa"] >= 2.5) & (transformed["gpa"] < 3.0)] = "Good"
-		performance.loc[(transformed["gpa"] >= 2.0) & (transformed["gpa"] < 2.5)] = "Acceptable"
-		performance.loc[transformed["gpa"] < 2.0] = "At Risk"
+		valid_gpa = transformed["gpa"].between(0, 4)
+		performance.loc[valid_gpa & (transformed["gpa"] >= 3.5)] = "Excellent"
+		performance.loc[valid_gpa & (transformed["gpa"] >= 3.0) & (transformed["gpa"] < 3.5)] = "Very Good"
+		performance.loc[valid_gpa & (transformed["gpa"] >= 2.5) & (transformed["gpa"] < 3.0)] = "Good"
+		performance.loc[valid_gpa & (transformed["gpa"] >= 2.0) & (transformed["gpa"] < 2.5)] = "Acceptable"
+		performance.loc[valid_gpa & (transformed["gpa"] < 2.0)] = "At Risk"
 		transformed["performance_level"] = performance
 
 	if "attendance" in transformed:
 		attendance_status = pd.Series(pd.NA, index=transformed.index, dtype="string")
-		attendance_status.loc[transformed["attendance"] >= 75] = "Good"
-		attendance_status.loc[transformed["attendance"] < 75] = "Low"
+		valid_attendance = transformed["attendance"].between(0, 100)
+		attendance_status.loc[valid_attendance & (transformed["attendance"] >= 75)] = "Good"
+		attendance_status.loc[valid_attendance & (transformed["attendance"] < 75)] = "Low"
 		transformed["attendance_status"] = attendance_status
 
 	return transformed
