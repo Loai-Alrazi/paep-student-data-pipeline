@@ -13,6 +13,8 @@ def count_duplicate_records(
 	subset: str | Iterable[str] | None = None,
 ) -> int:
 	"""Return the number of duplicate rows beyond the first copy."""
+	if subset is not None and not isinstance(subset, str):
+		subset = list(subset)
 	return int(data.duplicated(subset=subset, keep="first").sum())
 
 

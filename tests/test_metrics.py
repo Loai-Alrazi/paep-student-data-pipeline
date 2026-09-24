@@ -45,6 +45,19 @@ def test_count_duplicate_records_counts_only_extra_copies() -> None:
     assert count_duplicate_records(data, subset="student_id") == 3
 
 
+def test_count_duplicate_records_accepts_iterable_subset() -> None:
+    data = pd.DataFrame(
+        {
+            "student_id": [1001, 1001, 1002],
+            "term": ["fall", "fall", "spring"],
+        }
+    )
+
+    subset = (name for name in ["student_id", "term"])
+
+    assert count_duplicate_records(data, subset=subset) == 1
+
+
 def test_count_missing_values_counts_missing_cells() -> None:
     data = pd.DataFrame({"name": ["A", None], "score": [pd.NA, 90]})
 
