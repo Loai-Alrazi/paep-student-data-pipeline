@@ -142,10 +142,13 @@ def test_load_state_invalid_schema_raises_clear_error(tmp_path, content, match) 
 def test_first_run_identifies_all_records_as_new() -> None:
     data = make_students([(1001, "Ahmed", 3.0), (1002, "Sara", 2.0), (1003, "Lina", 3.5)])
 
-    new_or_changed, unchanged = identify_changes(data, {"version": 1, "records": {}})
-
+    new_or_changed, unchanged = identify_changes(data, {})
     assert list(new_or_changed["student_id"]) == [1001, 1002, 1003]
     assert unchanged.empty
+
+    full_empty_state, unchanged_full = identify_changes(data, {"version": 1, "records": {}})
+    assert list(full_empty_state["student_id"]) == [1001, 1002, 1003]
+    assert unchanged_full.empty
 
 
 def test_second_identical_run_identifies_all_as_unchanged(tmp_path) -> None:
@@ -244,6 +247,58 @@ def test_duplicate_student_ids_are_rejected_when_building_state() -> None:
         build_state(data)
 
 
+def test_duplicate_student_ids_are_rejected_by_identify_changes() -> None:
+    data = make_students([(1001, "Ahmed", 3.0), (1001, "Ahmed", 4.0)])
+
+    with pytest.raises(ValueError, match="duplicate"):
+        identify_changes(data, {"version": 1, "records": {}})
+
+
+def test_duplicate_keys_across_representations_are_rejected() -> None:
+    data = make_students([(1001, "Ahmed", 3.0), (1001.0, "Ahmed", 3.0)])
+
+    with pytest.raises(ValueError, match="duplicate"):
+        build_state(data)
+    with pytest.raises(ValueError, match="duplicate"):
+        identify_changes(data, {"version": 1, "records": {}})
+
+
+def test_integer_and_float_keys_produce_identical_canonical_state() -> None:
+    from_int = build_state(make_students([(1001, "Ahmed", 3.0)]))
+    from_float = build_state(make_students([(1001.0, "Ahmed", 3.0)]))
+
+    assert list(from_float["records"]) == ["1001"]
+    assert from_float == from_int
+
+
+def test_float_typed_keys_match_integer_state_as_unchanged() -> None:
+    state = build_state(make_students([(1001, "Ahmed", 3.0)]))
+    retyped = make_students([(1001.0, "Ahmed", 3.0)])
+
+    new_or_changed, unchanged = identify_changes(retyped, state)
+
+    assert new_or_changed.empty
+    assert list(unchanged["student_id"]) == [1001.0]
+
+
+def test_string_keys_are_rejected_instead_of_colliding() -> None:
+    data = make_students([("1001", "Ahmed", 3.0)])
+
+    with pytest.raises(ValueError, match="non-numeric"):
+        build_state(data)
+    with pytest.raises(ValueError, match="non-numeric"):
+        identify_changes(data, {"version": 1, "records": {}})
+
+
+def test_non_integer_numeric_keys_are_rejected_clearly() -> None:
+    data = make_students([(1001.5, "Ahmed", 3.0)])
+
+    with pytest.raises(ValueError, match="non-integer"):
+        build_state(data)
+    with pytest.raises(ValueError, match="non-integer"):
+        identify_changes(data, {"version": 1, "records": {}})
+
+
 def test_missing_student_id_values_are_rejected() -> None:
     data = make_students([(1001, "Ahmed", 3.0), (None, "Sara", 2.0)])
 
@@ -271,11 +326,30 @@ def test_build_state_is_deterministic_regardless_of_column_order() -> None:
     assert build_state(data) == build_state(reordered)
 
 
-def test_identify_changes_rejects_invalid_previous_state() -> None:
+@pytest.mark.parametrize(
+    ("previous_state", "match"),
+    [
+        ({"version": 2, "records": {}}, "unsupported schema version"),
+        ({"version": 1}, "'records'"),
+        ({"version": 1, "records": []}, "'records'"),
+        ({"version": 1, "records": {"1001": 42}}, "non-string fingerprint"),
+        ({"fingerprints": {}}, "unsupported schema version"),
+    ],
+)
+def test_identify_changes_rejects_malformed_previous_state(
+    previous_state, match
+) -> None:
     data = make_students([(1001, "Ahmed", 3.0)])
 
-    with pytest.raises(IncrementalStateError, match="'records'"):
-        identify_changes(data, {"fingerprints": {}})
+    with pytest.raises(IncrementalStateError, match=match):
+        identify_changes(data, previous_state)
+
+
+def test_identify_changes_rejects_non_mapping_previous_state() -> None:
+    data = make_students([(1001, "Ahmed", 3.0)])
+
+    with pytest.raises(TypeError, match="Mapping"):
+        identify_changes(data, "not a state")
 
 
 def test_save_state_rejects_invalid_state_without_writing(tmp_path) -> None:

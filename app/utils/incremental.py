@@ -65,7 +65,7 @@ def load_state(state_path: str | Path) -> dict:
         raise IncrementalStateError(
             f"Invalid JSON in incremental state file {path}: {exc}"
         ) from exc
-    return _validate_state(raw_state, path)
+    return _validate_state(raw_state, f"incremental state file {path}")
 
 
 def save_state(state: Mapping, state_path: str | Path) -> None:
@@ -84,17 +84,19 @@ def save_state(state: Mapping, state_path: str | Path) -> None:
 
 
 def build_state(data: pd.DataFrame, key_column: str = DEFAULT_KEY_COLUMN) -> dict:
-    """Build a fresh state mapping each record key to its fingerprint.
+    """Build a fresh state mapping each canonical record key to its fingerprint.
 
-    Raises ValueError when key_column is missing from the DataFrame or its
-    values are unusable as a stable key (missing or duplicated values would
-    make the state ambiguous).
+    Record keys are canonicalized, so integer-like values (1001, 1001.0)
+    share one stable state key. Raises ValueError when key_column is missing
+    from the DataFrame or its values are unusable as a stable key: missing,
+    duplicated, non-integer, or non-numeric values would make the state
+    ambiguous.
     """
-    _require_usable_keys(data, key_column, unique=True)
+    canonical_keys = _require_usable_keys(data, key_column)
     records: dict[str, str] = {}
     for position in range(len(data)):
         row = data.iloc[position]
-        records[str(row[key_column])] = fingerprint_record(row)
+        records[canonical_keys.iloc[position]] = fingerprint_record(row)
     return {"version": STATE_SCHEMA_VERSION, "records": records}
 
 
@@ -105,33 +107,37 @@ def identify_changes(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split records into (new_or_changed, unchanged) against previous state.
 
-    previous_state is the mapping returned by load_state or build_state; an
-    empty mapping means the first run, so every record is reported as new.
-    Row order inside each returned DataFrame follows the input order.
+    previous_state is the mapping returned by load_state or build_state and
+    must match the persisted state schema; an empty mapping means the first
+    run, so every record is reported as new. Row order inside each returned
+    DataFrame follows the input order.
 
-    Raises ValueError when key_column is missing or contains missing values,
-    and IncrementalStateError when previous_state has an invalid structure.
+    Raises ValueError when key_column is missing or its values are unusable
+    as a stable key (missing, duplicated, non-integer, or non-numeric
+    values), and IncrementalStateError when previous_state has an invalid
+    structure or schema.
     """
-    _require_usable_keys(data, key_column, unique=False)
+    canonical_keys = _require_usable_keys(data, key_column)
     records = _records_from_state(previous_state)
     new_positions: list[int] = []
     unchanged_positions: list[int] = []
     for position in range(len(data)):
         row = data.iloc[position]
-        key = str(row[key_column])
-        if records.get(key) == fingerprint_record(row):
+        if records.get(canonical_keys.iloc[position]) == fingerprint_record(row):
             unchanged_positions.append(position)
         else:
             new_positions.append(position)
     return data.iloc[new_positions], data.iloc[unchanged_positions]
 
 
-def _require_usable_keys(
-    data: pd.DataFrame,
-    key_column: str,
-    *,
-    unique: bool,
-) -> None:
+def _require_usable_keys(data: pd.DataFrame, key_column: str) -> pd.Series:
+    """Return canonical record keys, validating the whole key column first.
+
+    Raises ValueError when key_column is missing, contains missing values,
+    cannot be canonicalized, or contains duplicate canonical keys (including
+    equivalent values such as 1001 and 1001.0) that would silently overwrite
+    incremental state.
+    """
     if key_column not in data.columns:
         raise ValueError(f"key column {key_column!r} is not in the DataFrame columns")
     keys = data[key_column]
@@ -139,12 +145,44 @@ def _require_usable_keys(
         raise ValueError(
             f"{key_column} contains missing values; they cannot be used as incremental state keys"
         )
-    if unique and bool(keys.duplicated().any()):
-        duplicated = sorted({str(key) for key in keys[keys.duplicated(keep=False)]})
+    try:
+        canonical_keys = keys.map(_canonical_key)
+    except ValueError as exc:
+        raise ValueError(
+            f"{key_column} is not usable as an incremental state key: {exc}"
+        ) from exc
+    if bool(canonical_keys.duplicated().any()):
+        duplicated = sorted(canonical_keys[canonical_keys.duplicated(keep=False)].unique())
         raise ValueError(
             f"{key_column} contains duplicate values {duplicated}; "
             "they would silently overwrite incremental state"
         )
+    return canonical_keys
+
+
+def _canonical_key(value: Any) -> str:
+    """Return the canonical string form of one record key.
+
+    Integer-like numeric keys (1001, 1001.0, numpy integers) all map to
+    "1001" so a column pandas re-typed between runs still matches the
+    persisted state. Any other value (bool, non-integer number, string) is
+    rejected instead of being silently stringified, so semantically
+    different keys can never collide inside the state.
+
+    Raises ValueError for values that cannot serve as record keys.
+    """
+    if _is_missing(value):
+        raise ValueError(f"missing value {value!r}")
+    if isinstance(value, bool):
+        raise ValueError(f"boolean value {value!r}")
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        number = float(value)
+        if math.isfinite(number) and number.is_integer():
+            return str(int(number))
+        raise ValueError(f"non-integer value {value!r}")
+    raise ValueError(f"non-numeric value {value!r}")
 
 
 def _records_from_state(previous_state: Mapping) -> Mapping:
@@ -154,21 +192,10 @@ def _records_from_state(previous_state: Mapping) -> Mapping:
         )
     if not previous_state:
         return {}
-    if "records" not in previous_state:
-        raise IncrementalStateError(
-            "previous_state is missing the 'records' section; "
-            "pass the state returned by load_state or build_state"
-        )
-    records = previous_state["records"]
-    if not isinstance(records, Mapping):
-        raise IncrementalStateError(
-            "previous_state['records'] must be a mapping of record keys to fingerprints"
-        )
-    return records
+    return _validate_state(dict(previous_state), "previous_state")["records"]
 
 
-def _validate_state(state: Any, path: Path | None = None) -> dict:
-    label = f"incremental state file {path}" if path is not None else "incremental state"
+def _validate_state(state: Any, label: str = "incremental state") -> dict:
     if not isinstance(state, dict):
         raise IncrementalStateError(f"{label} must be a JSON object")
     version = state.get("version")
