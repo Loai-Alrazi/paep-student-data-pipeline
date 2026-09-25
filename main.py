@@ -1,1 +1,243 @@
-"""Main pipeline entry point placeholder."""
+"""End-to-end orchestration for the student data pipeline.
+
+main() composes the existing reusable modules only: extraction, source
+validation, cleaning, integration, transformation, lineage, final
+validation, incremental processing, metrics, logging, and output writing.
+No ETL business logic lives here.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+
+import pandas as pd
+
+from app.output.csv_writer import write_csv
+from app.sources.api_source import extract_api_data
+from app.sources.csv_source import load_data
+from app.sources.database_source import extract_database
+from app.transformation.cleaner import clean_data
+from app.transformation.integration import OUTPUT_COLUMNS, integrate_data
+from app.transformation.transformer import (
+	calculate_imputation_stats,
+	transform_data,
+)
+from app.utils.config_loader import load_config
+from app.utils.incremental import (
+	build_state,
+	identify_changes,
+	load_state,
+	save_state,
+)
+from app.utils.lineage import add_lineage
+from app.utils.logger import setup_logger
+from app.utils.metrics import (
+	PipelineMetrics,
+	count_duplicate_records,
+	count_missing_values,
+)
+from app.validation.quality import validate_final_data, validate_source_data
+
+FINAL_COLUMNS = OUTPUT_COLUMNS + [
+	"performance_level",
+	"attendance_status",
+	"source",
+]
+
+
+def main(config_path: str | Path | None = None) -> None:
+	"""Run the full pipeline using one configuration file."""
+	started = time.perf_counter()
+	config = load_config(config_path)
+	logger = setup_logger(config["logging"]["path"])
+	logger.info("Pipeline started.")
+	logger.info("Config loaded.")
+
+	try:
+		metrics = PipelineMetrics()
+
+		csv_raw = load_data(config["sources"]["csv"]["path"])
+		api_raw = extract_api_data(config["sources"]["api"])
+		database_raw = extract_database(config)
+		logger.info(
+			"Sources extracted: CSV=%d, API=%d, DATABASE=%d records.",
+			len(csv_raw),
+			len(api_raw),
+			len(database_raw),
+		)
+
+		raw_api_stats = calculate_imputation_stats(api_raw)
+
+		metrics.update_source_counts(
+			csv_records=len(csv_raw),
+			api_records=len(api_raw),
+			database_records=len(database_raw),
+		)
+		metrics.duplicate_records = count_duplicate_records(csv_raw)
+		metrics.missing_values = (
+			count_missing_values(csv_raw)
+			+ count_missing_values(api_raw)
+			+ count_missing_values(database_raw)
+		)
+
+		canonical_ids = _derive_canonical_ids(csv_raw)
+
+		csv_valid, csv_rejected = validate_source_data(csv_raw, "CSV")
+		api_valid, api_rejected = validate_source_data(
+			api_raw, "API", canonical_ids=canonical_ids
+		)
+		database_valid, database_rejected = validate_source_data(
+			database_raw, "DATABASE", canonical_ids=canonical_ids
+		)
+		rejections = pd.concat(
+			[csv_rejected, api_rejected, database_rejected],
+			ignore_index=True,
+		)
+		logger.info(
+			"Source validation completed: %d rejected records collected.",
+			len(rejections),
+		)
+
+		csv_clean = clean_data(csv_valid)
+		api_clean = clean_data(api_valid)
+		database_clean = clean_data(database_valid)
+		logger.info("Cleaning completed.")
+
+		integrated = integrate_data(csv_clean, api_clean, database_clean)
+		metrics.integrated_records = len(integrated)
+		logger.info("Integration completed: %d integrated records.", len(integrated))
+
+		new_or_changed, unchanged, reused = _apply_incremental_policy(
+			config, integrated, logger
+		)
+		logger.info(
+			"Incremental comparison completed: %d new/changed, %d unchanged, "
+			"%d reused rows.",
+			len(new_or_changed),
+			len(unchanged),
+			len(reused),
+		)
+
+		transformed_new = transform_data(
+			new_or_changed,
+			imputation_stats=raw_api_stats,
+			logger=logger,
+		)
+		transformed_new = add_lineage(transformed_new)
+		logger.info("Transformation completed.")
+
+		valid_new, final_rejected = validate_final_data(transformed_new)
+		rejections = pd.concat([rejections, final_rejected], ignore_index=True)
+		logger.info("Final validation completed.")
+
+		final_data = pd.concat([reused, valid_new], ignore_index=True)
+		final_data = _finalize_snapshot(final_data)
+		metrics.valid_records = len(final_data)
+		metrics.rejected_records = len(rejections)
+
+		write_csv(final_data, config["output"]["processed"])
+		write_csv(rejections, config["output"]["rejected"])
+		logger.info("Outputs written.")
+
+		if config.get("incremental", {}).get("enabled", False):
+			save_state(build_state(integrated), config["incremental"]["state_path"])
+			logger.info("Incremental state saved.")
+
+		metrics.record_processing_time(time.perf_counter() - started)
+		logger.info(metrics.summary())
+		logger.info("Pipeline completed.")
+	except Exception:
+		logger.exception("Pipeline failed.")
+		raise
+
+
+def _derive_canonical_ids(csv_raw: pd.DataFrame) -> set[int]:
+	"""Return raw non-null CSV student IDs before any rejection rules."""
+	if "student_id" not in csv_raw.columns:
+		return set()
+	numeric_ids = pd.to_numeric(csv_raw["student_id"], errors="coerce").dropna()
+	return {int(value) for value in numeric_ids}
+
+
+def _apply_incremental_policy(
+	config: dict, integrated: pd.DataFrame, logger: logging.Logger
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+	"""Split integrated records into rows to process and rows to reuse.
+
+	Returns (new_or_changed, unchanged, reused). Without incremental
+	processing every integrated row is processed and nothing is reused.
+	Unchanged rows are only reused from a previous final output that still
+	contains exactly those IDs; otherwise the pipeline falls back to full
+	processing so the snapshot can never become silently incomplete.
+	"""
+	if not config.get("incremental", {}).get("enabled", False):
+		return integrated, integrated.iloc[0:0], integrated.iloc[0:0]
+
+	previous_state = load_state(config["incremental"]["state_path"])
+	new_or_changed, unchanged = identify_changes(integrated, previous_state)
+	if unchanged.empty:
+		return new_or_changed, unchanged, new_or_changed.iloc[0:0]
+
+	reused = _load_reusable_rows(
+		Path(config["output"]["processed"]), unchanged
+	)
+	if reused is None:
+		logger.warning(
+			"Previous final output is missing or unusable for %d unchanged "
+			"records; falling back to full processing.",
+			len(unchanged),
+		)
+		return integrated, unchanged, new_or_changed.iloc[0:0]
+	return new_or_changed, unchanged, reused
+
+
+def _load_reusable_rows(
+	previous_path: Path, unchanged: pd.DataFrame
+) -> pd.DataFrame | None:
+	"""Return previous final rows for the unchanged IDs, or None if unusable.
+
+	Rows for IDs that are no longer in the current integrated snapshot are
+	never reused, so deleted records cannot survive in the new snapshot.
+	"""
+	if not previous_path.exists():
+		return None
+	try:
+		previous_final = pd.read_csv(previous_path)
+	except (OSError, ValueError):
+		return None
+	if not set(FINAL_COLUMNS).issubset(previous_final.columns):
+		return None
+
+	unchanged_ids = set(
+		pd.to_numeric(unchanged["student_id"]).astype("int64")
+	)
+	previous_ids = (
+		pd.to_numeric(previous_final["student_id"], errors="coerce")
+		.dropna()
+		.astype("int64")
+	)
+	mask = previous_ids.isin(unchanged_ids)
+	reusable = previous_final.loc[mask].copy()
+	reusable["student_id"] = previous_ids.loc[mask]
+	if len(reusable) != len(unchanged_ids):
+		return None
+	return reusable
+
+
+def _finalize_snapshot(final_data: pd.DataFrame) -> pd.DataFrame:
+	"""Order the final snapshot deterministically with the project columns.
+
+	student_id is normalized to integers so fresh rows (typed float by the
+	raw CSV blank-ID row) and reused rows (read back as integers) always
+	produce identical output files.
+	"""
+	ordered = final_data.sort_values("student_id", kind="mergesort")
+	ordered["student_id"] = pd.to_numeric(ordered["student_id"]).astype("int64")
+	columns = [column for column in FINAL_COLUMNS if column in ordered]
+	return ordered.loc[:, columns].reset_index(drop=True)
+
+
+if __name__ == "__main__":
+	main()
