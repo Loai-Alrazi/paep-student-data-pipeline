@@ -109,7 +109,10 @@ def pipeline_env(tmp_path, api_server):
 		config = {
 			"sources": {
 				"csv": {"path": str(csv_path)},
-				"api": {"url": api_url, "timeout_seconds": 5},
+				"api": {
+					"url": overrides.pop("api_url", api_url),
+					"timeout_seconds": 5,
+				},
 				"database": {"path": str(db_path)},
 			},
 			"output": {
@@ -249,6 +252,37 @@ def test_changed_record_is_reprocessed_and_snapshot_stays_complete(pipeline_env)
 	assert len(_read_state(pipeline_env.paths)["records"]) == 8
 
 
+def test_changed_imputation_median_reprocesses_unchanged_integrated_rows(
+	pipeline_env, api_server, tmp_path
+):
+	config_path = pipeline_env.make_config()
+	main(config_path)
+	first_final = _read_final(pipeline_env.paths)
+	first_1002 = first_final.loc[first_final["student_id"] == 1002].iloc[0]
+	assert first_1002["gpa"] == pytest.approx(3.0)
+	first_state = _read_state(pipeline_env.paths)
+
+	# Change only another API record's GPA so the raw API GPA median drops
+	# from 3.0 to 2.9 while 1002's integrated row (gpa still missing) is
+	# byte-for-byte identical between the two runs.
+	modified_api = json.loads(API_DATA_PATH.read_text(encoding="utf-8"))
+	for record in modified_api:
+		if record["student_id"] == 1001:
+			record["gpa"] = 2.0
+	modified_api_path = tmp_path / "students_academic_median_changed.json"
+	modified_api_path.write_text(json.dumps(modified_api), encoding="utf-8")
+
+	main(pipeline_env.make_config(api_url=api_server(modified_api_path)))
+
+	final = _read_final(pipeline_env.paths)
+	assert final["student_id"].tolist() == EXPECTED_VALID_IDS
+	student_1002 = final.loc[final["student_id"] == 1002].iloc[0]
+	assert student_1002["gpa"] == pytest.approx(2.9)
+	second_state = _read_state(pipeline_env.paths)
+	assert second_state["records"]["1002"] != first_state["records"]["1002"]
+	assert len(second_state["records"]) == 8
+
+
 def test_deleted_record_leaves_snapshot_without_that_student(pipeline_env):
 	config_path = pipeline_env.make_config()
 	main(config_path)
@@ -278,6 +312,29 @@ def test_missing_previous_final_output_falls_back_to_full_processing(pipeline_en
 	pd.testing.assert_frame_equal(first_final, _read_final(pipeline_env.paths))
 
 
+def test_malformed_previous_final_output_falls_back_to_full_processing(pipeline_env):
+	config_path = pipeline_env.make_config()
+	main(config_path)
+	expected_final = _read_final(pipeline_env.paths)
+
+	# Corrupt the previous snapshot while keeping the row count at 8:
+	# student 1001 appears twice and student 1002 is missing.
+	duplicated_1001 = expected_final.loc[expected_final["student_id"] == 1001]
+	without_1002 = expected_final.loc[expected_final["student_id"] != 1002]
+	malformed = pd.concat([without_1002, duplicated_1001], ignore_index=True)
+	assert len(malformed) == 8
+	malformed.to_csv(pipeline_env.paths.processed, index=False, encoding="utf-8")
+
+	main(config_path)
+
+	final = _read_final(pipeline_env.paths)
+	assert final["student_id"].tolist() == EXPECTED_VALID_IDS
+	assert final["student_id"].is_unique
+	assert final.loc[final["student_id"] == 1002].shape[0] == 1
+	assert (final["student_id"] == 1001).sum() == 1
+	pd.testing.assert_frame_equal(final, expected_final)
+
+
 def test_output_failure_on_first_run_does_not_save_state(pipeline_env, tmp_path):
 	blocked_output = tmp_path / "blocked_output"
 	blocked_output.mkdir()
@@ -287,7 +344,10 @@ def test_output_failure_on_first_run_does_not_save_state(pipeline_env, tmp_path)
 		main(config_path)
 
 	assert not pipeline_env.paths.state.exists()
-	assert not pipeline_env.paths.rejected.exists()
+	# Rejected output is written before the final output under the safe
+	# ordering; only the state must stay absent so no snapshot is ever
+	# committed against a missing final output.
+	assert pipeline_env.paths.rejected.exists()
 
 
 def test_output_failure_after_successful_run_keeps_previous_state(pipeline_env, tmp_path):
@@ -301,6 +361,49 @@ def test_output_failure_after_successful_run_keeps_previous_state(pipeline_env, 
 	with pytest.raises(IsADirectoryError):
 		main(config_path)
 
+	assert pipeline_env.paths.state.read_text(encoding="utf-8") == previous_state_text
+
+
+def test_rejected_write_failure_keeps_final_output_consistent_for_later_runs(
+	pipeline_env, tmp_path
+):
+	config_path = pipeline_env.make_config()
+	main(config_path)
+	first_final = _read_final(pipeline_env.paths)
+	previous_state_text = pipeline_env.paths.state.read_text(encoding="utf-8")
+
+	# RUN 2 changes the source to Mokha but fails while writing the
+	# rejected output; the reusable final snapshot must stay at Aden.
+	updated_csv = pipeline_env.csv_path.read_text(encoding="utf-8").replace(
+		'"Aden"', '"Mokha"'
+	)
+	pipeline_env.csv_path.write_text(updated_csv, encoding="utf-8")
+	blocked_rejected = tmp_path / "blocked_rejected"
+	blocked_rejected.mkdir()
+	failure_config = pipeline_env.make_config(rejected=blocked_rejected)
+
+	with pytest.raises(IsADirectoryError):
+		main(failure_config)
+
+	final_after_failure = _read_final(pipeline_env.paths)
+	student_1008 = final_after_failure.loc[final_after_failure["student_id"] == 1008]
+	assert student_1008.iloc[0]["city"] == "Aden"
+	assert pipeline_env.paths.state.read_text(encoding="utf-8") == previous_state_text
+
+	# RUN 3 reverts the source and removes the failure. The run matches the
+	# saved state and reuses rows, which must come from the unchanged Aden
+	# snapshot — never the Mokha data that failed to commit.
+	reverted_csv = pipeline_env.csv_path.read_text(encoding="utf-8").replace(
+		'"Mokha"', '"Aden"'
+	)
+	pipeline_env.csv_path.write_text(reverted_csv, encoding="utf-8")
+	main(pipeline_env.make_config())
+
+	final = _read_final(pipeline_env.paths)
+	assert final["student_id"].tolist() == EXPECTED_VALID_IDS
+	student_1008 = final.loc[final["student_id"] == 1008].iloc[0]
+	assert student_1008["city"] == "Aden"
+	pd.testing.assert_frame_equal(final, first_final)
 	assert pipeline_env.paths.state.read_text(encoding="utf-8") == previous_state_text
 
 

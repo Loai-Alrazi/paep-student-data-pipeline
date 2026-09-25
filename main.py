@@ -109,8 +109,9 @@ def main(config_path: str | Path | None = None) -> None:
 		metrics.integrated_records = len(integrated)
 		logger.info("Integration completed: %d integrated records.", len(integrated))
 
+		change_snapshot = _build_change_snapshot(integrated, raw_api_stats)
 		new_or_changed, unchanged, reused = _apply_incremental_policy(
-			config, integrated, logger
+			config, integrated, change_snapshot, logger
 		)
 		logger.info(
 			"Incremental comparison completed: %d new/changed, %d unchanged, "
@@ -137,12 +138,15 @@ def main(config_path: str | Path | None = None) -> None:
 		metrics.valid_records = len(final_data)
 		metrics.rejected_records = len(rejections)
 
-		write_csv(final_data, config["output"]["processed"])
+		# Rejected output is written before the reusable final snapshot: if
+		# either write fails, the final output and the saved state stay
+		# consistent, so a later unchanged run can never reuse a stale value.
 		write_csv(rejections, config["output"]["rejected"])
+		write_csv(final_data, config["output"]["processed"])
 		logger.info("Outputs written.")
 
 		if config.get("incremental", {}).get("enabled", False):
-			save_state(build_state(integrated), config["incremental"]["state_path"])
+			save_state(build_state(change_snapshot), config["incremental"]["state_path"])
 			logger.info("Incremental state saved.")
 
 		metrics.record_processing_time(time.perf_counter() - started)
@@ -161,24 +165,64 @@ def _derive_canonical_ids(csv_raw: pd.DataFrame) -> set[int]:
 	return {int(value) for value in numeric_ids}
 
 
+def _build_change_snapshot(
+	integrated: pd.DataFrame, raw_api_stats: dict[str, float]
+) -> pd.DataFrame:
+	"""Return the frame used for incremental fingerprints and state.
+
+	The snapshot is the integrated data plus the transformation context
+	(raw-API imputation medians) as extra per-row columns, so a changed
+	median changes every fingerprint and affected rows are reprocessed
+	instead of reusing stale final values. The context columns never reach
+	transform_data or the final output: changed IDs are mapped back to rows
+	of the original integrated frame only.
+	"""
+	snapshot = integrated.copy()
+	snapshot["__imputation_gpa"] = raw_api_stats["gpa"]
+	snapshot["__imputation_attendance"] = raw_api_stats["attendance"]
+	return snapshot
+
+
+def _student_ids(frame: pd.DataFrame) -> set[int]:
+	"""Return the normalized integer student IDs present in frame."""
+	return set(pd.to_numeric(frame["student_id"]).astype("int64"))
+
+
+def _rows_for_ids(integrated: pd.DataFrame, ids: set[int]) -> pd.DataFrame:
+	"""Select the original integrated rows for the given student IDs."""
+	mask = pd.to_numeric(integrated["student_id"]).astype("int64").isin(ids)
+	return integrated.loc[mask]
+
+
 def _apply_incremental_policy(
-	config: dict, integrated: pd.DataFrame, logger: logging.Logger
+	config: dict,
+	integrated: pd.DataFrame,
+	change_snapshot: pd.DataFrame,
+	logger: logging.Logger,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 	"""Split integrated records into rows to process and rows to reuse.
 
+	Change detection runs against change_snapshot (integrated data plus the
+	transformation-context columns), while both returned processing frames
+	always come from the original integrated data and never carry the
+	context columns.
+
 	Returns (new_or_changed, unchanged, reused). Without incremental
 	processing every integrated row is processed and nothing is reused.
-	Unchanged rows are only reused from a previous final output that still
-	contains exactly those IDs; otherwise the pipeline falls back to full
-	processing so the snapshot can never become silently incomplete.
+	Unchanged rows are only reused from a previous final output whose
+	student IDs are unique and contain exactly one row per unchanged ID;
+	otherwise the pipeline falls back to full processing so the snapshot
+	can never become silently incomplete or duplicated.
 	"""
 	if not config.get("incremental", {}).get("enabled", False):
 		return integrated, integrated.iloc[0:0], integrated.iloc[0:0]
 
 	previous_state = load_state(config["incremental"]["state_path"])
-	new_or_changed, unchanged = identify_changes(integrated, previous_state)
+	changed, unchanged = identify_changes(change_snapshot, previous_state)
+	new_or_changed = _rows_for_ids(integrated, _student_ids(changed))
+	unchanged = _rows_for_ids(integrated, _student_ids(unchanged))
 	if unchanged.empty:
-		return new_or_changed, unchanged, new_or_changed.iloc[0:0]
+		return new_or_changed, unchanged, integrated.iloc[0:0]
 
 	reused = _load_reusable_rows(
 		Path(config["output"]["processed"]), unchanged
@@ -189,7 +233,7 @@ def _apply_incremental_policy(
 			"records; falling back to full processing.",
 			len(unchanged),
 		)
-		return integrated, unchanged, new_or_changed.iloc[0:0]
+		return integrated, unchanged, integrated.iloc[0:0]
 	return new_or_changed, unchanged, reused
 
 
@@ -198,8 +242,13 @@ def _load_reusable_rows(
 ) -> pd.DataFrame | None:
 	"""Return previous final rows for the unchanged IDs, or None if unusable.
 
-	Rows for IDs that are no longer in the current integrated snapshot are
-	never reused, so deleted records cannot survive in the new snapshot.
+	The previous snapshot is only usable when required columns are present
+	and its student IDs are non-missing, integer-normalizable, and unique
+	across the whole file, with exactly one row for every unchanged ID. Any
+	violation returns None so the caller falls back to full processing
+	instead of partially repairing a malformed snapshot. Rows for IDs that
+	are no longer in the current integrated snapshot are never reused, so
+	deleted records cannot survive in the new snapshot.
 	"""
 	if not previous_path.exists():
 		return None
@@ -210,18 +259,16 @@ def _load_reusable_rows(
 	if not set(FINAL_COLUMNS).issubset(previous_final.columns):
 		return None
 
-	unchanged_ids = set(
-		pd.to_numeric(unchanged["student_id"]).astype("int64")
-	)
-	previous_ids = (
-		pd.to_numeric(previous_final["student_id"], errors="coerce")
-		.dropna()
-		.astype("int64")
-	)
+	previous_ids = pd.to_numeric(previous_final["student_id"], errors="coerce")
+	if previous_ids.isna().any() or previous_ids.duplicated().any():
+		return None
+	previous_ids = previous_ids.astype("int64")
+
+	unchanged_ids = _student_ids(unchanged)
 	mask = previous_ids.isin(unchanged_ids)
 	reusable = previous_final.loc[mask].copy()
 	reusable["student_id"] = previous_ids.loc[mask]
-	if len(reusable) != len(unchanged_ids):
+	if len(reusable) != len(unchanged_ids) or set(reusable["student_id"]) != unchanged_ids:
 		return None
 	return reusable
 
@@ -231,10 +278,17 @@ def _finalize_snapshot(final_data: pd.DataFrame) -> pd.DataFrame:
 
 	student_id is normalized to integers so fresh rows (typed float by the
 	raw CSV blank-ID row) and reused rows (read back as integers) always
-	produce identical output files.
+	produce identical output files. Assembly problems surface here as
+	errors: missing or duplicate IDs raise ValueError before anything is
+	written rather than being silently dropped from the snapshot.
 	"""
+	ids = pd.to_numeric(final_data["student_id"], errors="coerce")
+	if ids.isna().any():
+		raise ValueError("Final snapshot contains missing student_id values.")
+	if ids.duplicated().any():
+		raise ValueError("Final snapshot contains duplicate student_id values.")
 	ordered = final_data.sort_values("student_id", kind="mergesort")
-	ordered["student_id"] = pd.to_numeric(ordered["student_id"]).astype("int64")
+	ordered["student_id"] = ids.astype("int64")
 	columns = [column for column in FINAL_COLUMNS if column in ordered]
 	return ordered.loc[:, columns].reset_index(drop=True)
 
