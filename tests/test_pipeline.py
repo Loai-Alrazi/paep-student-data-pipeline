@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import main as main_module
 from main import FINAL_COLUMNS, main
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -405,6 +406,76 @@ def test_rejected_write_failure_keeps_final_output_consistent_for_later_runs(
 	assert student_1008["city"] == "Aden"
 	pd.testing.assert_frame_equal(final, first_final)
 	assert pipeline_env.paths.state.read_text(encoding="utf-8") == previous_state_text
+
+
+def test_state_save_failure_restores_previous_final_and_state(
+	pipeline_env, monkeypatch
+):
+	config_path = pipeline_env.make_config()
+	main(config_path)
+	final_before = pipeline_env.paths.processed.read_bytes()
+	state_before = pipeline_env.paths.state.read_bytes()
+
+	# RUN 2 changes the source to Mokha. save_state first performs a partial
+	# (corrupt) write, then fails; the final output has already been replaced
+	# with Mokha rows at that point.
+	updated_csv = pipeline_env.csv_path.read_text(encoding="utf-8").replace(
+		'"Aden"', '"Mokha"'
+	)
+	pipeline_env.csv_path.write_text(updated_csv, encoding="utf-8")
+
+	def failing_save_state(state, state_path):
+		Path(state_path).write_text('{"version": 1, "records": {"1001"', encoding="utf-8")
+		raise OSError("state save failed")
+
+	monkeypatch.setattr(main_module, "save_state", failing_save_state)
+	with pytest.raises(OSError):
+		main(config_path)
+
+	# Rollback must restore the exact previous final/state bytes.
+	assert pipeline_env.paths.processed.read_bytes() == final_before
+	assert pipeline_env.paths.state.read_bytes() == state_before
+
+	# RUN 3 reverts the source and uses the real save_state: the run matches
+	# the restored state and must reuse Aden rows, never stale Mokha values.
+	reverted_csv = updated_csv.replace('"Mokha"', '"Aden"')
+	pipeline_env.csv_path.write_text(reverted_csv, encoding="utf-8")
+	monkeypatch.undo()
+	main(config_path)
+
+	final = _read_final(pipeline_env.paths)
+	assert final["student_id"].tolist() == EXPECTED_VALID_IDS
+	student_1008 = final.loc[final["student_id"] == 1008].iloc[0]
+	assert student_1008["city"] == "Aden"
+	assert pipeline_env.paths.processed.read_bytes() == final_before
+	assert pipeline_env.paths.state.read_bytes() == state_before
+
+
+def test_first_run_state_failure_leaves_no_reusable_artifacts(
+	pipeline_env, monkeypatch
+):
+	config_path = pipeline_env.make_config()
+
+	def failing_save_state(state, state_path):
+		Path(state_path).write_text('{"version": 1', encoding="utf-8")
+		raise OSError("state save failed")
+
+	monkeypatch.setattr(main_module, "save_state", failing_save_state)
+	with pytest.raises(OSError):
+		main(config_path)
+
+	# A failed first run must not leave a reusable final snapshot or any
+	# partial state behind; the recalculated rejected output may remain.
+	assert not pipeline_env.paths.processed.exists()
+	assert not pipeline_env.paths.state.exists()
+	assert pipeline_env.paths.rejected.exists()
+
+	monkeypatch.undo()
+	main(config_path)
+
+	final = _read_final(pipeline_env.paths)
+	assert final["student_id"].tolist() == EXPECTED_VALID_IDS
+	assert len(_read_state(pipeline_env.paths)["records"]) == 8
 
 
 def test_incremental_disabled_processes_all_rows_independently_of_state(pipeline_env):

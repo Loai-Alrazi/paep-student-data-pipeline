@@ -141,12 +141,39 @@ def main(config_path: str | Path | None = None) -> None:
 		# Rejected output is written before the reusable final snapshot: if
 		# either write fails, the final output and the saved state stay
 		# consistent, so a later unchanged run can never reuse a stale value.
+		# With incremental processing the current final and state files are
+		# snapshotted first, so a failed state save restores that exact pair.
+		incremental_enabled = config.get("incremental", {}).get("enabled", False)
+		if incremental_enabled:
+			state_path = Path(config["incremental"]["state_path"])
+			previous_final = _read_file_snapshot(Path(config["output"]["processed"]))
+			previous_state = _read_file_snapshot(state_path)
+		else:
+			state_path = None
+
 		write_csv(rejections, config["output"]["rejected"])
 		write_csv(final_data, config["output"]["processed"])
 		logger.info("Outputs written.")
 
-		if config.get("incremental", {}).get("enabled", False):
-			save_state(build_state(change_snapshot), config["incremental"]["state_path"])
+		if incremental_enabled:
+			try:
+				save_state(build_state(change_snapshot), state_path)
+			except Exception:
+				logger.exception(
+					"Failed to save incremental state; restoring the previous "
+					"final output and state."
+				)
+				try:
+					_restore_file_snapshot(
+						Path(config["output"]["processed"]), previous_final
+					)
+					_restore_file_snapshot(state_path, previous_state)
+				except Exception:
+					logger.exception(
+						"Failed to restore the previous final output and state "
+						"after the state-save failure; they may be inconsistent."
+					)
+				raise
 			logger.info("Incremental state saved.")
 
 		metrics.record_processing_time(time.perf_counter() - started)
@@ -291,6 +318,27 @@ def _finalize_snapshot(final_data: pd.DataFrame) -> pd.DataFrame:
 	ordered["student_id"] = ids.astype("int64")
 	columns = [column for column in FINAL_COLUMNS if column in ordered]
 	return ordered.loc[:, columns].reset_index(drop=True)
+
+
+def _read_file_snapshot(path: Path) -> bytes | None:
+	"""Return a file's exact bytes, or None when it does not exist as a file."""
+	if not path.is_file():
+		return None
+	return path.read_bytes()
+
+
+def _restore_file_snapshot(path: Path, snapshot: bytes | None) -> None:
+	"""Return a file to its snapshotted bytes, deleting it when it had none.
+
+	snapshot=None means the file did not exist before the run, so any file
+	created by the failed run is removed; otherwise the previous bytes are
+	written back verbatim, preserving formatting and content exactly.
+	"""
+	if snapshot is None:
+		path.unlink(missing_ok=True)
+		return
+	path.parent.mkdir(parents=True, exist_ok=True)
+	path.write_bytes(snapshot)
 
 
 if __name__ == "__main__":
