@@ -10,6 +10,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 import requests
+
+from app.sources.base_source import BaseSource
 from app.utils.config_loader import load_config
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.json"
@@ -46,7 +48,7 @@ def _validate_api_config(config: Mapping[str, Any]) -> tuple[str, float]:
     return url, float(timeout)
 
 
-class APISource:
+class APISource(BaseSource):
     """Extract student records from a configured HTTP API endpoint."""
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
