@@ -336,6 +336,74 @@ def test_malformed_previous_final_output_falls_back_to_full_processing(pipeline_
 	pd.testing.assert_frame_equal(final, expected_final)
 
 
+@pytest.mark.parametrize(
+	("raw_id", "expected"),
+	[
+		(1001, 1001),
+		(1001.0, 1001),
+		("1001", 1001),
+	],
+)
+def test_snapshot_student_id_normalization_accepts_exact_integers(raw_id, expected):
+	normalized = main_module._normalize_integer_student_ids(pd.Series([raw_id]))
+
+	assert normalized is not None
+	assert normalized.dtype == "int64"
+	assert normalized.tolist() == [expected]
+
+
+@pytest.mark.parametrize(
+	"raw_id",
+	[
+		1001.5,
+		"1001.5",
+		float("nan"),
+		None,
+		float("inf"),
+		float("-inf"),
+		"abc",
+	],
+)
+def test_snapshot_student_id_normalization_rejects_invalid_values(raw_id):
+	assert main_module._normalize_integer_student_ids(pd.Series([raw_id])) is None
+
+
+def test_fractional_previous_student_id_triggers_full_processing(pipeline_env):
+	config_path = pipeline_env.make_config()
+	main(config_path)
+	expected_final = _read_final(pipeline_env.paths)
+
+	malformed = expected_final.astype({"student_id": "float64"})
+	malformed.loc[malformed["student_id"] == 1001, "student_id"] = 1001.5
+	malformed.loc[malformed["student_id"] == 1001.5, "city"] = "Corrupt"
+	malformed.to_csv(pipeline_env.paths.processed, index=False, encoding="utf-8")
+
+	main(config_path)
+
+	final = _read_final(pipeline_env.paths)
+	pd.testing.assert_frame_equal(final, expected_final)
+	assert "Corrupt" not in final["city"].tolist()
+
+
+def test_previous_student_ids_must_be_unique_after_normalization(
+	pipeline_env,
+):
+	config_path = pipeline_env.make_config()
+	main(config_path)
+	expected_final = _read_final(pipeline_env.paths)
+
+	malformed = expected_final.astype({"student_id": "object"})
+	malformed.loc[malformed["student_id"] == 1002, "student_id"] = "1001.0"
+	malformed.loc[malformed["student_id"] == "1001.0", "city"] = "Corrupt"
+	malformed.to_csv(pipeline_env.paths.processed, index=False, encoding="utf-8")
+
+	main(config_path)
+
+	final = _read_final(pipeline_env.paths)
+	pd.testing.assert_frame_equal(final, expected_final)
+	assert final["student_id"].is_unique
+
+
 def test_output_failure_on_first_run_does_not_save_state(pipeline_env, tmp_path):
 	blocked_output = tmp_path / "blocked_output"
 	blocked_output.mkdir()

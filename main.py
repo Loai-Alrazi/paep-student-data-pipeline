@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pandas as pd
@@ -270,7 +271,7 @@ def _load_reusable_rows(
 	"""Return previous final rows for the unchanged IDs, or None if unusable.
 
 	The previous snapshot is only usable when required columns are present
-	and its student IDs are non-missing, integer-normalizable, and unique
+	and its student IDs are finite exact integers and unique after normalization
 	across the whole file, with exactly one row for every unchanged ID. Any
 	violation returns None so the caller falls back to full processing
 	instead of partially repairing a malformed snapshot. Rows for IDs that
@@ -286,10 +287,9 @@ def _load_reusable_rows(
 	if not set(FINAL_COLUMNS).issubset(previous_final.columns):
 		return None
 
-	previous_ids = pd.to_numeric(previous_final["student_id"], errors="coerce")
-	if previous_ids.isna().any() or previous_ids.duplicated().any():
+	previous_ids = _normalize_integer_student_ids(previous_final["student_id"])
+	if previous_ids is None or previous_ids.duplicated().any():
 		return None
-	previous_ids = previous_ids.astype("int64")
 
 	unchanged_ids = _student_ids(unchanged)
 	mask = previous_ids.isin(unchanged_ids)
@@ -300,6 +300,30 @@ def _load_reusable_rows(
 	return reusable
 
 
+def _normalize_integer_student_ids(values: pd.Series) -> pd.Series | None:
+	"""Normalize exact, finite integer IDs without silently truncating them."""
+	int64_min = -(2**63)
+	int64_max = 2**63 - 1
+	normalized: list[int] = []
+
+	for value in values:
+		if pd.isna(value):
+			return None
+		try:
+			numeric = Decimal(str(value))
+		except (InvalidOperation, ValueError):
+			return None
+		if not numeric.is_finite() or numeric != numeric.to_integral_value():
+			return None
+
+		integer = int(numeric)
+		if integer < int64_min or integer > int64_max:
+			return None
+		normalized.append(integer)
+
+	return pd.Series(normalized, index=values.index, dtype="int64")
+
+
 def _finalize_snapshot(final_data: pd.DataFrame) -> pd.DataFrame:
 	"""Order the final snapshot deterministically with the project columns.
 
@@ -307,15 +331,15 @@ def _finalize_snapshot(final_data: pd.DataFrame) -> pd.DataFrame:
 	raw CSV blank-ID row) and reused rows (read back as integers) always
 	produce identical output files. Assembly problems surface here as
 	errors: missing or duplicate IDs raise ValueError before anything is
-	written rather than being silently dropped from the snapshot.
+	written rather than being truncated or silently dropped from the snapshot.
 	"""
-	ids = pd.to_numeric(final_data["student_id"], errors="coerce")
-	if ids.isna().any():
-		raise ValueError("Final snapshot contains missing student_id values.")
+	ids = _normalize_integer_student_ids(final_data["student_id"])
+	if ids is None:
+		raise ValueError("Final snapshot contains invalid student_id values.")
 	if ids.duplicated().any():
 		raise ValueError("Final snapshot contains duplicate student_id values.")
 	ordered = final_data.sort_values("student_id", kind="mergesort")
-	ordered["student_id"] = ids.astype("int64")
+	ordered["student_id"] = ids
 	columns = [column for column in FINAL_COLUMNS if column in ordered]
 	return ordered.loc[:, columns].reset_index(drop=True)
 
