@@ -3,21 +3,21 @@
 This file is the official data reference for the PAEP Student Data Pipeline.
 It defines the canonical datasets, schemas, and rules that all team members
 must follow. These are the only reference datasets for this assignment. Keep
-their intentional raw problems intact; the rules below describe future pipeline
-behavior, not cleaning to perform on these baseline files.
+their intentional raw problems intact; the rules below describe the implemented
+pipeline's behavior, not cleaning to perform on these baseline files.
 
 # Canonical Sources
 
 | Source | Canonical files | Role |
 | --- | --- | --- |
 | CSV | `data/raw/students.csv` | Raw student identity and demographic data |
-| REST API seed | `mock_api/students_academic.json` | Seed/reference data for the future Mock REST API |
+| REST API seed | `mock_api/students_academic.json` | Seed/reference data served by the Mock REST API (`mock_api/server.py`) |
 | SQLite | `database/students.db`, built from `database/schema.sql` and `database/seed.sql` | Raw courses and enrollments |
 
-Ziad will build the Mock REST API later. The final pipeline's `api_source.py`
-must use an HTTP request to that API; it must not read the seed JSON directly.
-The configured endpoint is `http://localhost:8000/students`. This baseline does
-not include an API server or ETL functionality.
+The Mock REST API is implemented in `mock_api/server.py`. The pipeline's
+`app/sources/api_source.py` extracts from that API over a real HTTP request; it
+must not read the seed JSON directly. The configured endpoint is
+`http://localhost:8000/students`.
 
 # Shared Key
 
@@ -60,7 +60,7 @@ ORDER BY e.student_id;
 ```
 
 It returns 12 records for this baseline. The deliberately invalid score remains
-in the raw database and is handled by future pipeline validation.
+in the raw database and is handled by the pipeline's validation.
 
 # Final Dataset Granularity
 
@@ -106,10 +106,10 @@ problem; this includes the in-range values for API student `1099`.
 
 - Valid GPA values, sorted: `1.8, 2.3, 2.6, 2.7, 2.9, 3.0, 3.1, 3.2, 3.6, 3.8, 3.9`.
 - Expected GPA median for this canonical dataset: **3.0**.
-- Student `1002` GPA becomes `3.0` in future processing.
+- Student `1002` GPA becomes `3.0` after imputation.
 - Valid attendance values, sorted: `68, 72, 76, 80, 84, 85, 88, 90, 90, 95, 98`.
 - Expected attendance median: **85**.
-- Student `1011` attendance becomes `85` in future processing.
+- Student `1011` attendance becomes `85` after imputation.
 
 # Non-Recoverable Problems
 
@@ -182,8 +182,8 @@ The required column order is:
 # Data Lineage
 
 For records built from all three sources, the final `source` value is exactly
-`CSV|API|DATABASE`. Lineage will be handled within integration and final dataset
-construction; it does not require a separate `lineage.py` module.
+`CSV|API|DATABASE`. Lineage is applied during final dataset construction: the
+`app/utils/lineage.py` module adds the `source` column to the integrated data.
 
 # Expected Final Valid Students
 
@@ -222,4 +222,4 @@ record; it is cleaned and counted in duplicate metrics.
 The four missing values are the blank CSV student ID, CSV student `1006`'s
 major, API student `1002`'s GPA, and API student `1011`'s attendance. Measure them
 before any recovery. Processing Time has no fixed expected value; it must be
-measured for each future pipeline run.
+measured for each pipeline run.
