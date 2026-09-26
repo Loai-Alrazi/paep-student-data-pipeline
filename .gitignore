@@ -34,6 +34,8 @@ coverage.xml
 
 # Runtime logs
 *.log
+# pipeline.log is an assignment deliverable
+!logs/pipeline.log
 
 # Editors and operating systems
 .vscode/

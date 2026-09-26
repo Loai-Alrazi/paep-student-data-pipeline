@@ -1,0 +1,29 @@
+2026-09-26 19:40:20,014 | INFO | Pipeline started.
+2026-09-26 19:40:20,015 | INFO | Config loaded.
+2026-09-26 19:40:22,074 | INFO | Sources extracted: CSV=14, API=13, DATABASE=12 records.
+2026-09-26 19:40:22,127 | INFO | Source validation completed: 6 rejected records collected.
+2026-09-26 19:40:22,138 | INFO | Cleaning completed.
+2026-09-26 19:40:22,152 | INFO | Integration completed: 8 integrated records.
+2026-09-26 19:40:22,160 | INFO | Incremental comparison completed: 8 new/changed, 0 unchanged, 0 reused rows.
+2026-09-26 19:40:22,160 | INFO | Starting student data transformation for 8 records.
+2026-09-26 19:40:22,163 | INFO | Replaced 1 missing major values with Unknown.
+2026-09-26 19:40:22,164 | INFO | Imputed 1 missing GPA values with median 3.00.
+2026-09-26 19:40:22,165 | INFO | Imputed 1 missing attendance values with median 85.00.
+2026-09-26 19:40:22,172 | INFO | Completed student data transformation for 8 records.
+2026-09-26 19:40:22,173 | INFO | Transformation completed.
+2026-09-26 19:40:22,190 | INFO | Final validation completed.
+2026-09-26 19:40:22,202 | INFO | Outputs written.
+2026-09-26 19:40:22,210 | INFO | Incremental state saved.
+2026-09-26 19:40:22,210 | INFO | ---
+## PIPELINE EXECUTION SUMMARY
+
+CSV Records : 14
+API Records : 13
+Database Records : 12
+Integrated Records : 8
+Valid Records : 8
+Rejected Records : 6
+Duplicate Records : 1
+Missing Values : 4
+Processing Time : 2.20 seconds
+2026-09-26 19:40:22,211 | INFO | Pipeline completed.
